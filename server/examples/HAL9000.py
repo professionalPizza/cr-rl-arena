@@ -142,7 +142,8 @@ def action_mask(obs):
     return mask
 
 
-async def main():
+async def play():
+    """One connection: join, then answer until it closes. Returns False if the server refused us."""
     async with websockets.connect(URL) as ws:
         await ws.send(json.dumps({"t": "join", "name": NAME, "deck": DECK}))
         async for raw in ws:
@@ -155,7 +156,9 @@ async def main():
             elif t == "joined":
                 print(f"joined as {msg['name']} (rating {msg['rating']})")
             elif t == "start":
-                print(f"match vs {msg['opponent']}")
+                # a tournament series can deal a deck for one game; the hand already shows it
+                dealt = msg.get("deck")
+                print(f"match vs {msg['opponent']}" + (f" with a dealt deck: {', '.join(dealt)}" if dealt else ""))
             elif t == "result":
                 print(f"  {msg['result'].upper()} {msg['crowns']}  rating {msg['rating']} "
                       f"({msg['delta']:+})  replay: /replay?id={msg['match']}")
@@ -163,7 +166,21 @@ async def main():
                 print(f"  match void: {msg['reason']}")
             elif t == "error":
                 print("error:", msg.get("msg"))
+                return False
+    return True
+
+
+async def main():
+    # Stay in the pool for the whole tournament. If the connection drops, join
+    # again under the same name: that is what keeps our place in the bracket.
+    while True:
+        try:
+            if not await play():
                 break
+        except (OSError, websockets.WebSocketException) as error:
+            print("connection lost:", error)
+        print("joining again in 5 s")
+        await asyncio.sleep(5)
 
 
 if __name__ == "__main__":

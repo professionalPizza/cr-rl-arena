@@ -57,11 +57,10 @@ def load_policy(args):
     return policy, decks[args.deck]
 
 
-async def main(args):
-    model, deck = load_policy(args)
-    if args.check_only:
-        return
+async def play(args, model, deck, games_left):
+    """One connection: join, then answer until it closes. Returns the games finished."""
     completed = 0
+    replay_base = args.url.replace("ws", "http", 1).rstrip("/")
 
     async with websockets.connect(args.url) as ws:
         await ws.send(json.dumps({
@@ -105,15 +104,22 @@ async def main(args):
                 print(f"Connected as {message['name']}")
 
             elif kind == "start":
-                print(f"Playing against {message['opponent']}")
+                # In a tournament series the server can deal a deck for one game
+                # in place of the one we joined with. The hand in every
+                # observation is already that deck's, so only say so.
+                dealt = message.get("deck")
+                print(
+                    f"Playing against {message['opponent']}"
+                    + (f" with a dealt deck: {', '.join(dealt)}" if dealt else "")
+                )
 
             elif kind == "result":
                 print(
                     f"{message['result']} — "
-                    f"http://localhost:8765/replay?id={message['match']}"
+                    f"{replay_base}/replay?id={message['match']}"
                 )
                 completed += 1
-                if completed >= args.games:
+                if games_left is not None and completed >= games_left:
                     break
 
             elif kind == "aborted":
@@ -121,6 +127,30 @@ async def main(args):
 
             elif kind == "error":
                 raise RuntimeError(message["msg"])
+
+    return completed
+
+
+async def main(args):
+    model, deck = load_policy(args)
+    if args.check_only:
+        return
+
+    # Stay in the pool for the whole tournament: a pairing can be a best of 5
+    # and there are several rounds, with long waits in between. If the
+    # connection drops (the server restarts, the network blips), join again
+    # under the same name, which is what keeps our place in the bracket.
+    games_left = args.games
+    while games_left is None or games_left > 0:
+        try:
+            completed = await play(args, model, deck, games_left)
+            if games_left is not None:
+                games_left -= completed
+        except (OSError, websockets.WebSocketException, RuntimeError) as error:
+            print(f"Connection lost: {error}")
+        if games_left is None or games_left > 0:
+            print("Joining again in 5 s")
+            await asyncio.sleep(5)
 
 
 if __name__ == "__main__":
@@ -131,10 +161,11 @@ if __name__ == "__main__":
     parser.add_argument("--check-only", action="store_true", help="Validate loading without joining matches")
     parser.add_argument("--name", default="Gandalf-review")
     parser.add_argument("--url", default="ws://localhost:8765")
-    parser.add_argument("--games", type=int, default=3)
+    parser.add_argument("--games", type=int, default=None,
+                        help="Stop after this many games (default: keep playing until stopped)")
     arguments = parser.parse_args()
 
-    if arguments.games < 1:
+    if arguments.games is not None and arguments.games < 1:
         parser.error("games must be positive")
     torch.set_num_threads(1)
     try:
